@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset
+      xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.sitemaps.org/schemas/sitemap/0.9
+            http://www.sitemaps.org/schemas/sitemap/0.9/sitemap.xsd">
+<!-- created with Free Online Sitemap Generator www.xml-sitemaps.com -->
+
+
+<url>
+  <loc>https://japric.github.io/</loc>
+  <lastmod>2024-09-12T09:34:46+00:00</lastmod>
+  <priority>1.00</priority>
+</url>
+<url>
+  <loc>https://japric.github.io/categories/</loc>
+  <lastmod>2024-09-12T09:34:46+00:00</lastmod>
+  <priority>0.80</priority>
+</url>
+<url>
+  <loc>https://japric.github.io/tags/</loc>
+  <lastmod>2024-09-12T09:34:46+00:00</lastmod>
+  <priority>0.80</priority>
+</url>
+<url>
+  <loc>https://japric.github.io/archives/</loc>
+  <lastmod>2024-09-12T09:34:46+00:00</lastmod>
+  <priority>0.80</priority>
+</url>
+<url>
+  <loc>https://japric.github.io/about/</loc>
+  <lastmod>2024-09-12T09:34:46+00:00</lastmod>
+  <priority>0.80</priority>
+</url>
+<url>
+  <loc>https://japric.github.io/posts/first-article/</loc>
+  <lastmod>2024-09-12T09:34:46+00:00</lastmod>
+  <priority>0.80</priority>
+</url>
+<url>
+  <loc>https://japric.github.io/tags/blog/</loc>
+  <lastmod>2024-09-12T09:34:46+00:00</lastmod>
+  <priority>0.80</priority>
+</url>
+<url>
+  <loc>https://japric.github.io/tags/cpp/</loc>
+  <lastmod>2024-09-12T09:34:46+00:00</lastmod>
+  <priority>0.80</priority>
+</url>
+<url>
+  <loc>https://japric.github.io/tags/python/</loc>
+  <lastmod>2024-09-12T09:34:46+00:00</lastmod>
+  <priority>0.80</priority>
+</url>
+<url>
+  <loc>https://japric.github.io/categories/tools/</loc>
+  <lastmod>2024-09-12T09:34:46+00:00</lastmod>
+  <priority>0.64</priority>
+</url>
+
+
+</urlset>
