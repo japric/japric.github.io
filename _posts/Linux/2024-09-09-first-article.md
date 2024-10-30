@@ -25,3 +25,16 @@ int main()
 print("Hello, World!")
 ```
 
+## Diagram
+
+### plantuml
+
+`demo plantuml`
+
+```plantuml
+@startuml
+A --> B
+@enduml
+```
+
+
