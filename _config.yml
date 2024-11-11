@@ -168,10 +168,10 @@ kramdown:
     block:
       line_numbers: true
       start_line: 1
-  plantuml:
-    width: 125%
-    height: none
-    style: none
+  # plantuml:
+  #   width: none
+  #   height: none
+  #   style: none
 
 collections:
   tabs:

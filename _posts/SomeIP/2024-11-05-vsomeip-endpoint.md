@@ -15,7 +15,7 @@ SOME/IP是由AUTOSAR标准化的一种新兴通信中间件标准。它旨在包
 
 一个基本的架构可以表示为如图
 
-![图片](/assets/images/2024/Nov/vsomeip_endpoint_arch1.png){:.image--xl}
+![图片](/assets/images/2024/Nov/vsomeip_endpoint_arch.png){:.image--xl}
 
 两个通过以太网链接相互连接的ECU（电子控制单元）。在 Linux 内核之上同时执行不同的应用程序。每个应用程序都有自己的vsomeip库实例。
 
@@ -27,149 +27,7 @@ SOME/IP是由AUTOSAR标准化的一种新兴通信中间件标准。它旨在包
 
 ### 3.1 endpoints
 
-
-```plantuml
-package vsomeip.endpoints {
-
-interface endpoint_host {
-+ {abstract} on_connect()
-+ {abstract} on_disconnect()
-}
-
-class endpoint_manager_base {
-- rm_ : runtime_manager_base*
-- io_ : boost::asio::io_service&
-- local_endpoints : std::map<client_t, std::shared_ptr<endpoint>>
-+ on_connect()
-+ on_disconnect()
-+ create_local()
-+ create_local_server()
-- create_local_unlocked()
-+ find_or_create_local()
-}
-
-class endpoint_manager_impl {
-+ on_connect()
-+ on_disconnect()
-+ create_client_endpoint()
-+ create_server_endpoint()
-}
-
-interface endpoint {
-+ {abstract} start()
-+ {abstract} stop()
-+ {abstract} send()
-+ {abstract} send_to()
-+ {abstract} receive()
-}
-
-class server_endpoint_impl <<Protocol>> {
-+ send()
-+ receive()
-+ {abstract} send_queued()
-+ connect_cbk()
-+ send_cbk()
-+ flush()
-+ flush_cbk()
-}
-
-' class local_server_endpoint_base_impl {
-
-' }
-
-class local_uds_server_endpoint_impl <boost::asio::local::stream_protocol> {
-
-}
-
-class local_tcp_server_endpoint_impl <boost::asio::ip::tcp> {
-
-}
-
-
-' class tcp_server_endpoint_base_impl {
-
-' }
-
-class tcp_server_endpoint_impl <boost::asio::ip::tcp> {
-
-}
-
-' class udp_server_endpoint_base_impl {
-
-' }
-
-class udp_server_endpoint_impl <boost::asio::ip::udp> {
-
-}
-
-class client_endpoint_impl << Protocol >> {
-+ send()
-+ send_to()
-+ receive()
-+ {abstract} send_queued()
-+ connect_cbk()
-+ send_cbk()
-+ flush()
-+ flush_cbk()
-}
-
-class local_uds_client_endpoint_impl <boost::asio::local::stream_protocol> {
-
-}
-
-class local_tcp_client_endpoint_impl <boost::asio::ip::tcp> {
-
-}
-
-
-
-' class local_client_endpoint_base_impl {
-
-' }
-
-' class tcp_client_endpoint_base_impl {
-
-' }
-
-class tcp_client_endpoint_impl <boost::asio::ip::tcp> {
-
-}
-
-
-' class udp_client_endpoint_base_impl {
-
-' }
-
-class udp_client_endpoint_impl <boost::asio::ip::udp> {
-
-}
-
-endpoint_manager_base::create_local_unlocked --> local_uds_client_endpoint_impl
-endpoint_manager_base::create_local_unlocked --> local_tcp_client_endpoint_impl
-endpoint_manager_base::create_local_server --> local_uds_server_endpoint_impl
-endpoint_manager_base::create_local_server --> local_tcp_server_endpoint_impl
-
-endpoint_manager_impl::create_client_endpoint --> udp_client_endpoint_impl
-endpoint_manager_impl::create_client_endpoint --> tcp_client_endpoint_impl
-endpoint_manager_impl::create_server_endpoint --> udp_server_endpoint_impl
-endpoint_manager_impl::create_server_endpoint --> tcp_server_endpoint_impl
-
-endpoint_host <|-- endpoint_manager_base
-endpoint_manager_base <|-- endpoint_manager_impl
-
-endpoint <|-- server_endpoint_impl
-server_endpoint_impl <|-- local_uds_server_endpoint_impl
-server_endpoint_impl <|-- local_tcp_server_endpoint_impl
-server_endpoint_impl <|-- tcp_server_endpoint_impl
-server_endpoint_impl <|-- udp_server_endpoint_impl
-
-endpoint <|-- client_endpoint_impl
-client_endpoint_impl <|-- local_uds_client_endpoint_impl
-client_endpoint_impl <|-- local_tcp_client_endpoint_impl
-client_endpoint_impl <|-- tcp_client_endpoint_impl
-client_endpoint_impl <|-- udp_client_endpoint_impl
-}
-```
+![图片](/assets/images/2024/Nov/vsomeip_endpoints.svg){:.image--xl}
 
 endpoint相关类包括了一组接口和实现，用于给应用程序创建本地endpoint和远程endpoint，以**进行IPC和RPC通信**
 
