@@ -15,4 +15,6 @@ gem 'kramdown-plantuml'
 
 gem 'jekyll-graphviz-dot', '~> 0.1.4'
 
+gem 'jekyll-compose', group: [:jekyll_plugins]
+
 gem "wdm", "~> 0.1.1", :platforms => [:mingw, :x64_mingw, :mswin]
