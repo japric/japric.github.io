@@ -3,6 +3,7 @@ title: init blog
 date: 2024-09-09 20:20:00 +0800
 categories: [Tools]
 tags: [blog,cpp,python]
+mermaid: true
 ---
 
 ## a "hello world" program
@@ -37,4 +38,33 @@ A --> B
 @enduml
 ```
 
+```
+```plantuml
+@startuml
+A --> B
+@enduml
+```
+
+
+
+```mermaid
+
+sequenceDiagram  
+
+    participant A as a
+    participant B as b
+    A->>B : target
+
+```
+
+```
+```mermaid
+
+sequenceDiagram  
+
+    participant A as a
+    participant B as b
+    A->>B : target
+
+```
 
