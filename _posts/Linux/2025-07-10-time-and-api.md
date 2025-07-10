@@ -76,6 +76,7 @@ phc_ctl[31856.285]: clock time is 1751998409.995321853 or Wed Jul  9 02:13:29 20
 - tm是日历类型，因为它其中包含了年月日等信息. 通过gmtime，localtime和mktime函数可以将time_t和tm类型互相转换
 - 考虑到时区的差异，因此存在gmtime和localtime两个函数
 
+![图片](/assets/images/2025/July/ctime.png){:.image--xl}
 
 ### 2.2 CPP11
 
@@ -117,7 +118,7 @@ system_clock与另外两个clock不一样的地方在于，它还提供了两个
 | from_time_t    | 转换 std::time_t 到系统时钟时间点            |
 
 
-
+![图片](/assets/images/2025/July/chrono_time.png){:.image--xl}
 
 
 ```c++
