@@ -77,6 +77,8 @@ sudo apt install libboost-dev libboost-system-dev libboost-thread-dev libboost-f
 
 `repo init -u git@github.com:japric/vsomeip_repo.git -m default.xml --repo-url=https://mirrors.tuna.tsinghua.edu.cn/git/git-repo/`
 
+`repo sync -j4`
+
 ### build
 
 
