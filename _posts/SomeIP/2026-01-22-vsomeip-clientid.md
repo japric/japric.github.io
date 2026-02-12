@@ -305,3 +305,267 @@ the_configuration_data__->routing_manager_host_ = 0x0001;         //路由管理
 | 多Proxy先启动 | 第一个Proxy | 保持0x0000，等待Host     | 第一个Proxy创建和初始化 |
 
 
+## 3 vsomeip3上的分析
+
+### 3.0 准备
+
+参考代码 `https://github.com/japric/vsomeip/tree/vsomeip_demo` vsomeip3 (3.4.10)
+
+
+
+### 3.1 从代码看clientid的分配逻辑
+
+
+#### 3.1.1 routing host
+
+```
+应用启动
+    ↓
+调用 is_routing_manager(network)
+    ↓
+检查 data__[network] 是否存在？
+    ├─ Yes → 返回 false (已有routing manager)
+    └─ No
+        ↓
+    创建 data__[network] 数据结构
+        ↓
+    尝试获取文件锁 /tmp/network.lck
+        ↓
+    [Linux] fcntl(F_SETLK) 文件锁获取成功？
+        ├─ No → 返回 false (成为普通应用)
+        └─ Yes
+            ↓
+        返回 true (成为 routing manager)
+            ↓
+        ════════════════════════════════════
+        │        ID 分配阶段开始           │
+        ════════════════════════════════════
+            ↓
+    调用 request_client_id(name, client)
+            ↓
+    加锁保护 std::lock_guard<std::mutex>
+            ↓
+    查找 data__[network] 是否存在？
+        ├─ No → 返回 VSOMEIP_CLIENT_UNSET (无权限)
+        └─ Yes
+            ↓
+        计算地址空间范围
+        ├─ smallest_client = diagnosis_address << 8
+        └─ biggest_client = smallest_client | client_mask
+            ↓
+        初始化 next_client_ = smallest_client (如果未设置)
+            ↓
+        请求特定 client ID？
+            ├─ Yes (client != UNSET)
+            │   ↓
+            │ 检查 used_clients_[client] 是否已使用？
+            │   ├─ No → 分配成功，返回 client
+            │   └─ Yes
+            │       ↓
+            │     应用名匹配？
+            │       ├─ Yes → 返回 client (重复请求)
+            │       └─ No → 记录警告，继续自动分配
+            │           ↓
+            └─ No (自动分配)
+                ↓
+            检查是否需要循环？
+            (next_client_ == biggest_client?)
+                ├─ Yes → next_client_ = smallest_client
+                └─ No → 继续
+                    ↓
+            开始 ID 搜索循环
+                ↓
+            执行递增算法
+            ├─ 保留诊断位: next_client_ & ~client_mask
+            ├─ 客户端位+1: ((next_client_ | ~client_mask) + 1) & client_mask  
+            └─ 合并结果: 诊断位 | 客户端位
+                ↓
+            检查新 ID 是否可用？
+                ├─ used_clients_.find(new_id) != end? → 已使用，继续循环
+                ├─ is_configured_client_id(new_id)? → 配置预留，继续循环
+                └─ 可用
+                    ↓
+                检查循环次数超限？
+                    ├─ Yes → 返回 VSOMEIP_CLIENT_UNSET (ID耗尽)
+                    └─ No
+                        ↓
+                    更新状态
+                    ├─ used_clients_[new_id] = name
+                    └─ next_client_ = new_id + 1
+                        ↓
+                    返回 new_id (分配成功)
+```
+
+
+#### 3.1.2 routing client
+
+
+```
+普通应用启动
+    ↓
+调用 application_impl::init()
+    ↓
+从配置文件获取预分配 client ID
+client_ = configuration->get_id(name_)
+    ↓
+检查是否为 routing manager？
+    ├─ Yes → 调用 utility::request_client_id() (动态分配)
+    └─ No (普通应用)
+        ↓
+    检查配置文件中的 client ID 是否有效？
+        ├─ client_ != VSOMEIP_CLIENT_UNSET → 使用预分配ID
+        │   ↓
+        │ 创建 routing_manager_client 实例
+        │   ↓
+        │ ═══════════════════════════════════
+        │ │        IPC 通信阶段           │
+        │ ═══════════════════════════════════
+        │   ↓
+        │ 查找 routing manager 的 UDS 端点
+        │ /tmp/vsomeip-network (Unix域套接字)
+        │   ↓
+        │ 尝试连接到 routing manager
+        │   ↓
+        │ 连接成功？
+        │   ├─ No → 应用启动失败
+        │   │     ↓
+        │   │   VSOMEIP_ERROR: "Cannot connect to routing manager"
+        │   │     ↓
+        │   │   返回 false (初始化失败)
+        │   │
+        │   └─ Yes
+        │       ↓
+        │     发送注册消息到 routing manager
+        │     {
+        │       command: REGISTER_APPLICATION,
+        │       client_id: client_,
+        │       name: name_
+        │     }
+        │       ↓
+        │     等待 routing manager 确认
+        │       ↓
+        │     接收确认消息？
+        │       ├─ No → 注册超时，应用启动失败
+        │       └─ Yes
+        │           ↓
+        │         注册成功！应用可以正常工作
+        │         ├─ 接收服务发现消息
+        │         ├─ 转发消息到 routing manager  
+        │         └─ 处理来自 routing manager 的消息
+        │
+        └─ client_ == VSOMEIP_CLIENT_UNSET → 配置错误
+            ↓
+          ❌ 严重错误：普通应用没有预分配 client ID
+            ↓
+          可能的处理方式：
+          ├─ 应用直接启动失败
+          ├─ 使用默认 ID (存在冲突风险)
+          └─ 尝试其他分配策略 (实现相关)
+```
+
+
+
+
+##### 3.1.2.1 详细的**连接到 routing manager**的过程
+
+```
+普通应用启动
+    ↓
+application_impl::init()
+    ↓ 
+routing_ = std::make_shared<routing_manager_client>(...)
+    ↓  
+routing_->init()
+    ↓
+routing_manager_client::init()  
+    ↓ 
+sender_ = ep_mgr_->create_local(VSOMEIP_ROUTING_CLIENT)
+    ↓
+endpoint_manager_base::create_local(0)
+    ↓ 
+create_local_unlocked(0)
+    ↓ 
+生成路径: utility::get_base_path("") + "0" = "/tmp/vsomeip-0" 
+    ↓ 
+创建 local_uds_client_endpoint_impl 连接到 /tmp/vsomeip-0
+    ↓ 
+输出日志: "Client [5555] is connecting to [0] at /tmp/vsomeip-0"
+    ↓ 
+its_endpoint->start() // 启动连接
+```
+
+
+
+##### 3.1.2.2 核心的endpoint和socket代码
+
+```c++
+// 创建
+// vsomeip/implementation/endpoints/src/endpoint_manager_base.cpp
+endpoint_manager_base::create_local_unlocked(client_t _client) {
+
+
+        its_endpoint = std::make_shared<local_uds_client_endpoint_impl>(
+            shared_from_this(), rm_->shared_from_this(),
+            boost::asio::local::stream_protocol::endpoint(its_path.str()),  // 创建boost endpoint, 使用的参数是“/tmp/vsomeip-xxx”
+            io_, configuration_);
+                // local_uds_client_endpoint_impl
+                local_uds_client_endpoint_impl::local_uds_client_endpoint_impl(
+                    const std::shared_ptr<endpoint_host>& _endpoint_host,
+                    const std::shared_ptr<routing_host>& _routing_host,
+                    const endpoint_type& _remote,                           // 创建的boost endpoint
+                    boost::asio::io_context &_io,
+                    const std::shared_ptr<configuration>& _configuration)
+                        // 基类client_endpoint_impl<boost::asio::local::stream_protocol>
+                        client_endpoint_impl<Protocol>::client_endpoint_impl(...)
+                            : endpoint_impl<Protocol>(...),
+                            // typedef typename Protocol::socket socket_type;
+                            socket_(std::make_unique<socket_type>(_io)), // 创建boost socket
+                            remote_(_remote),  // 创建的boost endpoint 
+
+        VSOMEIP_INFO << "Client [" << std::hex << rm_->get_client() << "] is connecting to ["
+            << std::hex << _client << "] at " << its_path.str();
+
+
+// 连接
+// local_uds_client_endpoint_impl.cpp
+void local_uds_client_endpoint_impl::connect() {
+    // ...
+    socket_->open(remote_.protocol(), its_error);              // 打开socket
+    
+    if (!its_error || its_error == boost::asio::error::already_open) {
+        socket_->set_option(boost::asio::socket_base::reuse_address(true), its_error);  // 设置选项
+        // ...
+        state_ = cei_state_e::CONNECTING;
+        socket_->connect(remote_, its_connect_error);          // 使用endpoint连接, remote_即是boost endpoint(/tmp/vsomeip-xxx), boost::asio::local::stream_protocol::socket
+    }
+}
+
+```
+
+
+
+从unix domain socket(uds)的视角
+, 对应cliendid的分配以及uds的创建流程可以总结为
+
+```
+应用启动
+    ↓
+创建Sender UDS Socket (固定路径)
+    ↓  
+连接到Routing Manager
+    ↓
+发送ASSIGN_CLIENT_ID请求
+    ↓
+Routing Manager分配客户端ID
+    ↓
+接收分配的客户端ID
+    ↓
+创建Receiver UDS Socket (基于客户端ID的唯一路径)  
+    ↓
+启动Receiver Socket监听
+    ↓
+发送REGISTER_APPLICATION请求
+    ↓
+应用完全就绪
+```
+
