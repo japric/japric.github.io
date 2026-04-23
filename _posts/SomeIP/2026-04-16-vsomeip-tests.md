@@ -280,3 +280,203 @@ slave侧可以看到类似成功打印
 [  PASSED  ] 4 tests.
 ```
 
+## 5 测试case剖析
+
+### 5.1 debounce_test
+
+#### server/client 环境隔离
+
+由于这是一个跨网络通信的case 所以理论上应当更适合用两个主机环境分别一个跑server, 一个跑client来完成.
+
+在一台主机跑这类case 则要考虑靠如何隔离server和client的资源
+
+1是**网络隔离**, 这一点已经在`2.2`章节中通过linux网络命名空间技术来完成
+
+2是**文件资源隔离**. 本测试分别需要为server和client启动各自的`routingmanagerd`以进行`SOME/IP`网络数据发送和接收处理
+
+为了避免两个routingmanagerd同时使用了同名的uds文件用于系统内unix socket通信, 造成数据混乱和逻辑异常
+
+我们在配置文件中分别指定了不同的的`vsomeip`的`network`配置参数, 这会使得server使用`/tmp/vsomeip_master*`这样命名的文件, 区分于client端
+
+在`https://github.com/japric/vsomeip/commits/vsomeip_demo/`这个分支上已经做好这个修改，所以在`2.1`中准备好的代码不需要额外做下边的修改了，可以直接用
+
+
+> // vsomeip/test/network_tests/debounce_tests/conf/debounce_test_client.json.in
+```json
+  "unicast" : "@TEST_IP_MASTER@",
+  "network" : "vsomeip_master",
+```
+
+> // vsomeip/test/network_tests/debounce_tests/conf/debounce_test_server.json.in
+```json
+  "unicast" : "@TEST_IP_SLAVE@",
+  "network" : "vsomeip_slave",
+```
+
+#### 数据流
+
+```
+  ════════════════════════════════════════════════════════════
+  MASTER 侧  (host netns)
+  ════════════════════════════════════════════════════════════
+
+   debounce_test_client
+   · app name: "debounce_test_client"
+   · 订阅事件 0x8001/0x8002/0x8004
+   · 发 START_METHOD(0x0998) / STOP_METHOD(0x0999)
+         │  ▲
+         │  │  Unix Domain Socket (本地 IPC)
+         │  │  /tmp/vsomeip_master-{client_id}    ← 每个 app 一个
+         ▼  │
+   routingmanagerd  [RM_master]
+   · VSOMEIP_CONFIGURATION=debounce_test_client.json
+   · network = "vsomeip_master"
+   · 监听 UDS server: /tmp/vsomeip_master-0
+   · unicast bind: 192.168.99.1
+   · 负责: debounce 过滤(按 client.json 规则) 在转给 app 前执行
+         │
+         │  veth_master  192.168.99.1
+  ═══════╪════════════════════════════════════════════════════
+         │              网 络 流 量
+         │
+         │  ① SD 多播  UDP  224.251.192.252:30490  ←→ 双向
+         │              RM_slave 周期广播 OfferService
+         │              RM_master 回 SubscribeEventgroup
+         │
+         │  ② 事件通知  UDP unicast  src:192.168.99.2:30503
+         │                           dst:192.168.99.1:?
+         │              RM_slave → RM_master (notify payload)
+         │
+         │  ③ 方法调用  UDP unicast  src:192.168.99.1:?
+         │                           dst:192.168.99.2:30503
+         │              RM_master → RM_slave (REQUEST 0x0998/0x0999)
+         │
+  ═══════╪════════════════════════════════════════════════════
+         │  veth_slave  192.168.99.2  (in slave_ns)
+         │
+   routingmanagerd  [RM_slave]
+   · VSOMEIP_CONFIGURATION=debounce_test_service.json
+   · network = "vsomeip_slave"
+   · 监听 UDS server: /tmp/vsomeip_slave-0
+   · unicast bind: 192.168.99.2
+         │  ▲
+         │  │  Unix Domain Socket (本地 IPC)
+         │  │  /tmp/vsomeip_slave-{client_id}
+         ▼  │
+   debounce_test_service
+   · app name: "debounce_test_service"
+   · 提供服务 0xb657 / instance 0x0003
+   · UDP unreliable port: 30503
+   · 收到 START_METHOD → 连续 notify() 10次三个事件
+   · 收到 STOP_METHOD  → app->stop()
+
+  ════════════════════════════════════════════════════════════
+  SLAVE 侧  (slave_ns)
+  ════════════════════════════════════════════════════════════
+
+```
+
+#### 时序
+
+测试case的时序图
+
+```plantuml
+@startuml debounce_flow
+title vsomeip Debounce 测试 — 进程间数据流
+
+participant "debounce_test_service\n(slave 应用)" as SVC #lightblue
+participant "routingmanagerd\n(slave)" as SRMD #lightblue
+participant "routingmanagerd\n(master)" as CRMD #salmon
+participant "debounce_test_client\n(master 应用)" as CLI #lightgreen
+
+== 初始化 ==
+CLI -> CRMD : subscribe(event, debounce_filter)\n含 ignore 配置
+CRMD -> CRMD : event::add_subscriber()\n构建 filters_[client] lambda
+
+== 触发测试 ==
+CLI -> CRMD : send START request (method 0x0998)
+CRMD -> SRMD : 转发 START
+SRMD -> SVC : 投递 START 请求
+
+== 服务端连续发送 10 条事件 ==
+loop 10 次 (i = 0..9)
+    SVC -> SRMD : app_->notify(event, payload[i])
+    SRMD -> CRMD : UDP 包 (全部 10 条原样发出)
+    
+    alt payload 有效字节相比上次发生变化
+        CRMD -> CRMD : get_filtered_subscribers()\n→ filters_[client](old, new) = true
+        CRMD -> CLI : 投递事件
+        CLI -> CLI : on_message()\nEXPECT_EQ 验证 payload
+    else payload 有效字节与上次相同
+        CRMD -> CRMD : get_filtered_subscribers()\n→ filters_[client](old, new) = false
+        note right of CRMD #salmon : 静默丢弃\n不通知应用
+    end
+end
+
+== 测试结束 ==
+CLI -> CRMD : send STOP request (method 0x0999)
+CRMD -> SRMD : 转发 STOP
+SRMD -> SVC : 投递 STOP
+SVC -> SVC : app_->stop()
+
+@enduml
+```
+
+
+#### 内部逻辑
+
+测试case的内部业务逻辑: 数据过滤
+
+```plantuml
+@startuml debounce_filter_logic
+title filters_[client] lambda 过滤逻辑\n(event::add_subscriber 构建, event.cpp ~552行)
+
+start
+
+:接收 old_payload, new_payload;
+
+if (payload 长度不同?) then (是)
+    :i 从 min_len 遍历到 max_len;
+    if (超出部分字节\n在 ignore 且 mask==0xFF?) then (全部忽略)
+        :继续比较重叠部分;
+    else (有未被忽略的字节)
+        :is_changed = true;
+        stop
+    endif
+endif
+
+:i 从 0 遍历到 min_len;
+
+while (还有字节?) is (是)
+    if (byte[i] 在 ignore 列表?) then (否)
+        if (old[i] != new[i]?) then (是)
+            :is_changed = true;
+            stop
+        endif
+    else (是)
+        if (mask == 0xFF?) then (是)
+            note right : 整字节忽略\n跳过
+        else (否, partial mask)
+            if ((old[i] & ~mask)\n!= (new[i] & ~mask)?) then (是)
+                :is_changed = true;
+                stop
+            endif
+        endif
+    endif
+endwhile (否)
+
+:is_changed = false;
+
+fork
+    if (is_changed?) then (true)
+        :**return true**\n→ 投递给应用;
+    else (false)
+        :**return false**\n→ 静默丢弃;
+    endif
+endfork
+
+stop
+
+@enduml
+
+```
