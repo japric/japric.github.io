@@ -62,7 +62,14 @@ sudo ip netns exec slave_ns ip addr | grep veth_slave
     inet 192.168.99.2/24 scope global veth_slave
 ```
 
+做后配置两个route
+```bash
+# host 侧（veth_master）
+sudo ip route add 224.0.0.0/4 dev veth_master
 
+# slave 侧（veth_slave in slave_ns）
+sudo ip netns exec slave_ns ip route add 224.0.0.0/4 dev veth_slave
+```
 
 
 ## 3 编译代码
