@@ -9,6 +9,8 @@ tags: [cpp,linux,system]
 
 STR(Suspend To RAM) 是系统级的休眠挂起。在车载场景里, ECU 进入休眠前如果直接断电, 远端节点是感知不到本节点服务下线的——SOME/IP 的服务发现依赖 TTL, 对端要等到 TTL 超时才会把服务标记为不可用. 这段空窗期里, 对端仍会向一个已经"死了"的服务发请求、等响应, 最终触发超时和错误的 availability 状态.
 
+![STR 直接断电的困境](/assets/images/2026/Jul/01-scene-power-cut-problem.png)
+
 vsomeip 给了系统软件一个显式的接口 `set_routing_state()`, 让本节点在真正休眠前先把服务"优雅地"撤下来: 主动发 StopOffer / StopSubscribe, 清掉本地路由表和订阅记录. 唤醒后再把服务重新 offer 出去, 整个过程对应用层尽量透明.
 
 本文记录 vsomeip 对 STR 的支持, 以及 `suspend_resume_tests` 这个测试 case 是怎么验证它的. 阅读前建议先了解 vsomeip 的 Routing Host / Routing Proxy 架构.
@@ -135,6 +137,8 @@ unset_all_eventpayloads(s.first, i.first);
 
 路由表和事件 payload 缓存一并清掉, 保证 resume 后是干净的重新开始. 唤醒后网络拓扑可能已经变了, 这些缓存留着只会出错.
 
+![挂起四步流程](/assets/images/2026/Jul/02-flowchart-suspend-four-steps.png)
+
 
 ## 4 恢复流程(RS_RESUMED)
 
@@ -195,18 +199,20 @@ Host: 重启 SD, 重新 offer 服务
 
 Proxy 侧的恢复逻辑和正常的服务可用通知复用同一条路径, 不用单独搞一套 resume 逻辑, 职责单一.
 
+![恢复六步流程](/assets/images/2026/Jul/03-flowchart-resume-six-steps.png)
+
 
 ## 5 Host 与 Proxy 职责对比
 
-| 维度 | Routing Host | Routing Proxy |
-| --- | --- | --- |
-| 角色 | 主导者、协调者 | 被动执行者 |
-| 挂起触发 | 收到 `set_routing_state(RS_SUSPENDED)` | 收到 Host 广播的 SUSPEND_ID |
-| 网络操作 | 发 StopOffer、StopSubscribe SD 消息 | 无 |
-| SD 控制 | 停止/启动 Service Discovery | 无 SD 控制权 |
-| 路由表操作 | 删远程服务、强过期订阅 | 仅清本地 subscriber count |
-| 恢复触发 | 收到 `set_routing_state(RS_RESUMED)` | 通过 routing_info 间接感知(无 RESUME 命令) |
-| 恢复动作 | 重新 offer 所有服务、重启 SD | 收到 availability 通知后自动重订阅 |
+| 维度       | Routing Host                           | Routing Proxy                              |
+| ---------- | -------------------------------------- | ------------------------------------------ |
+| 角色       | 主导者、协调者                         | 被动执行者                                 |
+| 挂起触发   | 收到 `set_routing_state(RS_SUSPENDED)` | 收到 Host 广播的 SUSPEND_ID                |
+| 网络操作   | 发 StopOffer、StopSubscribe SD 消息    | 无                                         |
+| SD 控制    | 停止/启动 Service Discovery            | 无 SD 控制权                               |
+| 路由表操作 | 删远程服务、强过期订阅                 | 仅清本地 subscriber count                  |
+| 恢复触发   | 收到 `set_routing_state(RS_RESUMED)`   | 通过 routing_info 间接感知(无 RESUME 命令) |
+| 恢复动作   | 重新 offer 所有服务、重启 SD           | 收到 availability 通知后自动重订阅         |
 
 整体交互时序:
 
@@ -235,6 +241,8 @@ Proxy 侧的恢复逻辑和正常的服务可用通知复用同一条路径, 不
 |                                  |    auto re-subscribe         |
 +-----------------------------------------------------------------+
 ```
+
+![Host 与 Proxy 职责对比](/assets/images/2026/Jul/04-comparison-host-vs-proxy.png)
 
 
 ## 6 测试: suspend_resume_tests
@@ -328,6 +336,8 @@ client 的 `run_test()` 串行走 5 个阶段, 每个阶段都有 10s 限时:
  │                               on_message(TEST_STOP) → 退出
 ```
 
+![五阶段测试流程](/assets/images/2026/Jul/05-timeline-test-five-phases.png)
+
 有两个设计点值得拎出来:
 
 **toggle 的目的.** client 在触发 suspend 前故意做了 3 次 subscribe/unsubscribe 循环, 而且 service 侧 `on_subscribe(false)` 里 `sleep(2s)` 故意慢. 这是在制造竞态: suspend 触发时, 上一次 unsubscribe 的慢速处理可能还没完. 测试要验证在这种"订阅状态正在变动"的窗口里触发 suspend 不会死锁、不会留下半截状态.
@@ -337,13 +347,13 @@ client 的 `run_test()` 串行走 5 个阶段, 每个阶段都有 10s 限时:
 
 ## 7 关键设计细节
 
-| 方面 | 说明 |
-| --- | --- |
-| TTL=3 的时序含义 | SD TTL=3s, cyclic_offer_delay=1000ms. suspend 后 service 停发 cyclic offer, client 最多等约 3s 才感知不可用. 这解释了阶段2的超时为什么设 10s(3s TTL + 余量) |
-| send_suspend() 后 sleep(50ms) | 保证 suspend 控制消息在网络层真正发出去, 避免 client 已经进入等待而 service 还没收到 |
-| 订阅恢复不自动 | resume 不自动恢复订阅, 必须靠 SD 重新发现后由 client 自动重订阅. 这和 suspend 时 `unsubscribe_all_on_suspend()` 清掉远端订阅是对称的——挂起时撤干净, 恢复时重新建 |
-| 事件恢复(field 重投递) | service `offer_service()` 里用 `ET_FIELD` 注册事件并 notify 初始 payload {0x1,0x2,0x3}. resume 后重新 offer 触发 field 初始事件重新投递, 这是恢复后应用能重新拿到状态的关键 |
-| send_stop 仅成功时发 | client `run_test()` 里 `was_successful` 为真才发 send_stop, 失败则不发, 让 service 侧 30s 超时, 测试框架正常记录失败 |
-| 线程安全 | `routing_state_mutex_` 保护状态切换的原子性 |
-| 时间记录 | `last_resume_` 记录最近一次恢复时间, 诊断用 |
-| 信号触发 vs 生产触发 | 测试用 SIGUSR1/SIGUSR2 触发 daemon 状态切换, 生产环境里由系统电源管理调用 `set_routing_state()` |
+| 方面                          | 说明                                                                                                                                                                        |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| TTL=3 的时序含义              | SD TTL=3s, cyclic_offer_delay=1000ms. suspend 后 service 停发 cyclic offer, client 最多等约 3s 才感知不可用. 这解释了阶段2的超时为什么设 10s(3s TTL + 余量)                 |
+| send_suspend() 后 sleep(50ms) | 保证 suspend 控制消息在网络层真正发出去, 避免 client 已经进入等待而 service 还没收到                                                                                        |
+| 订阅恢复不自动                | resume 不自动恢复订阅, 必须靠 SD 重新发现后由 client 自动重订阅. 这和 suspend 时 `unsubscribe_all_on_suspend()` 清掉远端订阅是对称的——挂起时撤干净, 恢复时重新建            |
+| 事件恢复(field 重投递)        | service `offer_service()` 里用 `ET_FIELD` 注册事件并 notify 初始 payload {0x1,0x2,0x3}. resume 后重新 offer 触发 field 初始事件重新投递, 这是恢复后应用能重新拿到状态的关键 |
+| send_stop 仅成功时发          | client `run_test()` 里 `was_successful` 为真才发 send_stop, 失败则不发, 让 service 侧 30s 超时, 测试框架正常记录失败                                                        |
+| 线程安全                      | `routing_state_mutex_` 保护状态切换的原子性                                                                                                                                 |
+| 时间记录                      | `last_resume_` 记录最近一次恢复时间, 诊断用                                                                                                                                 |
+| 信号触发 vs 生产触发          | 测试用 SIGUSR1/SIGUSR2 触发 daemon 状态切换, 生产环境里由系统电源管理调用 `set_routing_state()`                                                                             |
