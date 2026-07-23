@@ -1,5 +1,5 @@
 ---
-title: vsomeip test-运行vsomeip的官方测试
+title: vsomeip test-veth虚拟以太网配置和运行vsomeip官方测试
 date: 2026-04-15 19:20:00 +0800
 categories: [SOME/IP, vsomeip]
 tags: [cpp,linux,system]
