@@ -1,5 +1,5 @@
 ---
-title: vsomeip clientid分配逻辑
+title: vsomeip clientid分配逻辑中的共享内存文件锁和IPC机制
 date: 2026-01-22 19:20:00 +0800
 categories: [SOME/IP, vsomeip]
 tags: [cpp,linux,system]
