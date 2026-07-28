@@ -1,5 +1,5 @@
 ---
-title: "PTPv2协议原理"
+title: "PTPv2协议原理 (精确时间协议 一)"
 date: 2026-07-23 17:20:00 +0800
 categories: [PTP]
 tags: [network,protocol,time]
