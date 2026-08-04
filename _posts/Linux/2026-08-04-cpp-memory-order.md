@@ -1,4 +1,3 @@
-2026-08-04-cpp-memory-order.md
 ---
 title: "C++ Memory Order详解"
 date: 2026-08-04 20:00:00 +0800
