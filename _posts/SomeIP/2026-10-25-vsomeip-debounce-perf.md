@@ -7,12 +7,12 @@ tags: [cpp,linux,system]
 
 ## 1 前言
 
-前篇[vsomeip test-veth虚拟以太网配置和运行vsomeip官方测试]({% post_url SomeIP/2026-04-16-vsomeip-tests %})把`vsomeip/test/network_tests/debounce_tests`跑了起来，并拆解了它的过滤机制：客户端json里的`debounce`配置（`on_change`+`ignore`/`mask`内容过滤）注册在接收侧的routingmanagerd（host侧的称RM_master，slave侧的称RM_slave）上，`event::add_subscriber()`为每个订阅者构建一个payload比较lambda，被判定"未变化"的事件不会投递给应用。
+前篇[vsomeip test-veth虚拟以太网配置和运行vsomeip官方测试]({% post_url SomeIP/2026-04-16-vsomeip-tests %})把`vsomeip/test/network_tests/debounce_tests`跑了起来，并拆解了它的过滤机制：客户端json里的`debounce`配置（`on_change`+`ignore`/`mask`内容过滤）由接收侧的routingmanagerd（host侧的称RM_master，slave侧的称RM_slave）按json配置在注册事件时构建`epsilon_change_func_`，被判定"未变化"的事件不会投递给应用。
 
-这套机制对资源的实际影响需要量化回答三个问题：省了多少CPU、省在哪个环节、过滤本身付出多少成本。本文用A/B对比实验加perf采样测量，负载为5000条/约7秒的事件通知。结论先行：
+这套机制对资源的实际影响需要量化回答三个问题：省了多少CPU、省在哪个环节、过滤本身付出多少成本。本文用A/B对比实验加perf采样测量，负载为5000条、约5秒的事件通知（perf采样窗口7秒）。结论先行：
 
 - client进程CPU从约15%单核降到约0（-99.9%）；
-- RM_master CPU下降42%，而过滤本身只花12%；
+- RM_master CPU下降42%，而过滤本身只花12%（两者基数不同，见9.2）；
 - 网络链路流量零节省——过滤发生在收包之后，省的是"收下来之后"的一切。
 
 实验环境承接前篇：单机veth+netns模拟双机，拓扑与搭建命令见前文。测量机只有无线网卡，perf版本6.8.12，`kernel.perf_event_paranoid=4`（内核限制perf权限的等级，此值下非root完全不可用），所有perf命令必须加sudo。文中全部数据来自`results_A_ignored/`、`results_B_ignored/`目录下的perf stat与perf report原始输出。
@@ -36,7 +36,7 @@ tags: [cpp,linux,system]
 
 service以0xb657/0x0003offer三个FIELD事件（字段状态的通知，事件号0x8001/0x8002/0x8004），每个子测试发10条notify，客户端过滤后期望收到5~6条。flat子测试在事件0x8001上配置ignore字节[0,5]，字节0/5任意变化视为未变化，10条只转发5条；increase/decrease子测试在0x8002上配置ignore[0,5,7,8,9,10]，payload长度逐条递增/递减，考察长度变化与ignore的交互；mask子测试在0x8004上带位掩码（index 0 mask 0x0f、index 5 mask 0xfe），被mask掉的位变化不算变化。
 
-old/new payload逐字节比较的内部逻辑（ignore跳过、partial mask按`~mask`位比较）就是前篇拆解的`event::add_subscriber()`构建的filters lambda，此处不再重复；本篇的perf diff会在热点里再次见到这个lambda。
+old/new payload逐字节比较的内部逻辑（ignore跳过、partial mask按`~mask`位比较）与前篇拆解的`event::add_subscriber()`构建的filters lambda相同；不过本测试走的是json配置路径，实际执行的是`register_event()`构建的`epsilon_change_func_`，`filters_`为空。此处不再重复；本篇的perf diff会在热点里再次见到`register_event()`的这个lambda。
 
 ## 3 数据通路与收益模型
 
@@ -55,13 +55,13 @@ participant "client app\n(host netns)" as CLI #lightgreen
 SVC -> SRM : ① UDS
 SRM -> VETH : ② UDP 发送
 VETH -> MRM : ③ UDP 接收
-MRM -> MRM : filters_[client]\n逐字节比较 old/new payload
+MRM -> MRM : epsilon_change_func_\n逐字节比较 old/new payload
 MRM -> CLI : ④ UDS 投递
 CLI -> CLI : ⑤ on_message 分发
 
 note over MRM #salmon
   debounce 过滤器注册在③与④之间：
-  event::add_subscriber() 构建的 lambda，
+  register_event() 构建的 epsilon_change_func_，
   判定"未变化"时④⑤整段免除
 end note
 
@@ -79,7 +79,7 @@ debounce过滤器站在第④跳的入口上，过滤判定发生在③收包完
 2. 省的是④的UDS投递加⑤：每条被过滤的消息免掉RM_master的UDS序列化发送、client一次进程唤醒/上下文切换、payload拷贝和消息分发处理；
 3. RM_master自身新增一次old/new payload比较：CPU持平或略升都属正常，不能作为"配置无效"的判据。
 
-实测对照：假设1成立（两组veth RX包数一致）；假设2成立（client开销归零）；假设3过于保守——RM_master实际净省42%，省掉的转发开销远大于新增的比较开销，见第9章。
+实测对照：假设1成立（两组veth RX包数一致）；假设2成立（client开销归零）；假设3过于悲观——RM_master实际净省42%，省掉的转发开销远大于新增的比较开销，见第9章。
 
 ## 4 测量方案设计
 
@@ -109,7 +109,7 @@ B组（去抖）直接使用现有`debounce_test_client.json`；A组（基线）
 ]
 ```
 
-事件0x8002（ignore[0,5,7,8,9,10]）与0x8004（mask）同结构，不逐条列出。A组跑的时候用`VSOMEIP_CONFIGURATION`环境变量指向nodebounce json即可，不需要改官方的starter启动脚本。两组唯一的差别就是debounce段的有无，其余配置、负载、采样窗口完全一致。
+事件0x8002（ignore[0,5,7,8,9,10]）与0x8004（mask）同结构，不逐条列出。A组跑的时候用`VSOMEIP_CONFIGURATION`环境变量指向nodebounce json即可，不需要改官方的starter启动脚本。两组唯一的差别就是debounce段的有无，其余配置、负载、采样窗口完全一致。组别与压力模式是两个独立维度：A/B只决定debounce有无；压力模式由`DEBOUNCE_STRESS`环境变量控制（见4.2、6章），本文两组实验均加压。
 
 ### 4.2 负载放大
 
@@ -128,7 +128,7 @@ B组（去抖）直接使用现有`debounce_test_client.json`；A组（基线）
 
 ### 4.4 指标体系
 
-测量围绕四类指标：veth_master的RX包数差值做控制变量校验（A/B两组必须相等）；client实收条数做去抖生效证据（B约6条、A约5010条）；client与RM_master的CPU占用做核心收益指标（`perf stat -p`按PID采样）；`perf record -F 99 -g`（每秒采样99次、记录调用栈）加`perf diff`对比两组热点分布。每组跑5轮取均值和标准差。
+测量围绕四类指标：veth_master的RX包数差值做控制变量校验（A/B两组必须相等）；client实收条数做去抖生效证据（B约6条、A约5010条）；client与RM_master的CPU占用做核心收益指标（`perf stat -p`按PID采样）；`perf record -F 99 -g`（每秒采样99次、记录调用栈）加`perf diff`对比两组热点分布。每组跑5轮取均值和标准差；采样窗口7秒，下文CPU占比与每秒速率按该窗口折算；perf diff占比来自末轮单次采样（见9.2）。
 
 CPU占用取perf stat的三个事件：task-clock，任务实际占用CPU运行的时长，单位ms，等待和睡眠不累计；context-switches，内核记录到该任务的上下文切换次数，进程睡眠让出核与被唤醒重新调度都计入；cpu-migrations，任务在CPU核之间的迁移次数。第8章数据表把后两项分别缩写为ctx、mig。
 
@@ -169,9 +169,9 @@ if (test_id_ == debounce_test_id_e::DTI_FLAT) {
 
 payload共7字节：ignored模式只递增第0字节（被ignore），real模式只改第1字节（非ignore）。两条`VSOMEIP_INFO`一条用来对齐perf采样窗口，一条用来校验负载完整性。
 
-### 5.2 client侧：三处配套
+### 5.2 client侧：五处配套
 
-压力模式下client的期望表只有5~6条，而基线组会收到全量消息，直接比对必然越界，几千条gtest失败输出还会污染测量。client做三处配套改动。
+两组都加压：flat下B组实收6条，A组实收全量5010条，而client的期望表只有5~6条，直接比对必然越界，几千条gtest失败输出还会污染测量。client做五处配套改动。
 
 构造函数读`DEBOUNCE_STRESS`置`is_stress_`标志：
 
@@ -216,7 +216,7 @@ if (is_stress_) {
 }
 ```
 
-`compare_payload`加越界保护，index超出期望表长度直接返回false，基线模式收全量消息时不会崩：
+`compare_payload`加越界保护，index超出期望表长度直接返回false，关闭stress只跑功能测试时A组会收到全量消息（flat实测10条而期望表只有5条），不会越界崩溃：
 
 ```c++
 // debounce_test_client.cpp
@@ -290,7 +290,7 @@ perf stat -p "$CLIENT_PID" -o "$RES/run${i}_client.stat" -- sleep "$WINDOW" &
 
 ### 7.3 perf附加竞态
 
-`perf stat -p <pid>`偶发附加失败：目标PID在捕获与attach之间退出或异常，整个stat文件只有header，或所有事件显示`<not counted>`（伴随的NMI watchdog提示是误导）。B组run1/2的client、A组run1的RM_master中招。处理办法是不中断流程，跑完剔除坏样本（5轮取4轮均值）；根治要加PID有效性校验。
+`perf stat -p <pid>`偶发附加失败：目标PID在捕获与attach之间退出或异常，整个stat文件只有header，或所有事件显示`<not counted>`（伴随的NMI watchdog提示是误导）。B组run1/2的client、A组run1的RM_master中招。处理办法是不中断流程，跑完按指标剔除坏样本、取有效轮次均值（A组RM n=4，B组client n=3）；根治要加PID有效性校验。
 
 ### 7.4 perf diff版本差异
 
@@ -302,7 +302,7 @@ Ubuntu 24.04的perf 6.8里perf diff没有`--stdio`选项（perf report才有）�
 
 ## 8 实验数据
 
-负载5000条stress（ignored模式）加4个功能测试，perf窗口7~9秒，每组5轮。表中RM列均指RM_master，ctx、mig的含义见4.4节。
+负载5000条stress（ignored模式）加4个功能测试，perf采样窗口7秒，每组5轮。本表数据只覆盖flat子测试——stress只加在flat，其余3个子测试的计数在各自app实例内、且在采样窗口结束后才运行，实取计数来自flat的`Received`日志首行。压力模式下gtest的PASSED只验证订阅/停止等流程断言，payload行为由flat的实收条数单独验证。表中RM列均指RM_master，ctx、mig的含义见4.4节。
 
 ### 8.1 A组（基线，无去抖）
 
@@ -332,11 +332,11 @@ Ubuntu 24.04的perf 6.8里perf diff没有`--stdio`选项（perf report才有）�
 
 | 指标（7s窗口）              | A基线                       | B去抖         | 节省              |
 | --------------------------- | --------------------------- | ------------- | ----------------- |
-| **client task-clock**       | 1096.5 ± 19 ms（约15%单核） | ≈ 0.02 ms     | **≈ 100%**        |
-| **client context-switches** | 19350 ± 179                 | 1             | **≈ 100%**        |
-| client cpu-migrations       | 2904                        | ≈ 0           | ≈ 100%            |
-| **RM_master task-clock**    | 743.9 ± 8 ms（n=4）         | 430.9 ± 46 ms | **-42%**          |
-| RM_master context-switches  | 12818 ± 234                 | 9938 ± 65     | -22%              |
+| **client task-clock**       | 1096.5 ± 19 ms（约15%单核，n=5） | ≈ 0.02 ms（n=3） | **≈ 100%**        |
+| **client context-switches** | 19350 ± 179（n=5）          | 1             | **≈ 100%**        |
+| client cpu-migrations       | 2904（n=5）                 | ≈ 0           | ≈ 100%            |
+| **RM_master task-clock**    | 743.9 ± 8 ms（n=4）         | 430.9 ± 46 ms（n=5） | **-42%**          |
+| RM_master context-switches  | 12818 ± 234（n=4）          | 9938 ± 65（n=5） | -22%              |
 | veth_master RX包数          | ≈ 5010                      | ≈ 5010        | 0（控制变量成立） |
 
 ## 9 数据分析
@@ -345,9 +345,9 @@ Ubuntu 24.04的perf 6.8里perf diff没有`--stdio`选项（perf report才有）�
 
 ![client与RM_master的task-clock对比（7s采样窗口均值）](/assets/images/2026/Oct/25-comparison-debounce-cpu.png)
 
-client收益接近归零：基线下5010条消息每条一次UDS唤醒，约716次/秒的唤醒频率吃掉约15%单核、每秒约2760次上下文切换；去抖后client在整个窗口只醒一次。这是过滤发生在RM_master、下游全部免单的直接证据。
+client开销接近归零：基线下5010条消息每条一次UDS唤醒，约716次/秒的唤醒频率（5010条/7秒窗口）吃掉约15%单核、每秒约2760次上下文切换；去抖后client在整个窗口只醒一次。这是过滤发生在RM_master、下游全部免单的直接证据。
 
-RM_master净省42%：省掉的是每条消息的UDS序列化发送加唤醒对端，新增的是payload逐字节比较。假设3的"持平或略升"判断过于保守。
+RM_master净省42%：省掉的是每条消息的UDS序列化发送加唤醒对端，新增的是payload逐字节比较。假设3的"持平或略升"判断过于悲观。
 
 网络侧零节省被证实：两组veth收包数一致（控制变量成立），这条链路的成本与客户端debounce配置无关。
 
@@ -355,11 +355,11 @@ RM_master净省42%：省掉的是每条消息的UDS序列化发送加唤醒对�
 
 ### 9.2 perf diff热点解读（RM_master，A→B）
 
-B组最大用户态热点是`routing_manager_base::register_event(...)::{lambda#2}::_M_invoke`，diff占比+12.41%——正是注册事件时构建的payload比较lambda（前篇拆解的filters lambda）。去抖的价格约12%的RM CPU，对比42%的净节省，收益远大于成本。
+以下均为B组相对A组同符号的采样占比差，来自末轮单次`perf record -F 99 -g`。B组最大用户态热点是`routing_manager_base::register_event(...)::{lambda#2}::_M_invoke`，diff占比+12.41%——正是注册事件时根据json配置构建的`epsilon_change_func_`（比较算法与前篇拆解的filters lambda相同；本测试未走`subscribe_with_debounce`，`filters_`为空）。去抖的价格约12%的RM CPU（B组profile内占比），对比42%的净节省（以A组task-clock为基数）——两者基数不同，不能直接相减，但收益远大于成本。
 
 A组独占约13%的`[unknown] 0000000000000000`热区——无符号信息的地址，perf无法映射到函数名，推测是内联的拷贝/解析代码——B组消失。A组还独占一组转发路径符号：`pthread_mutex_lock`、`pthread_cond_signal`（唤醒等待线程）、`__tls_get_addr`（线程本地变量寻址）、`_Rb_tree_increment`（订阅/路由红黑树遍历）、`find_instance`（端点查找）——"查路由→UDS发送→唤醒client"这条链路的开销，B组归零。
 
-B组占比上升的内核符号（futex、ttwu_queue_wakelist、datagram_poll、epoll_wait、psi_task_switch）不代表绝对开销变高：diff百分比是各自profile内的占比，B总CPU更小，"每包一次唤醒"的固定开销占比被放大。`__skb_recv_udp`在A组占10.65%，收包两组都在发生，与去抖无关。
+B组中这些内核符号（futex、ttwu_queue_wakelist、datagram_poll、epoll_wait、psi_task_switch）的占比更高，但不代表绝对开销增加。perf diff比较的是同一符号在两组profile中的采样占比：B组总CPU更小，而收包路径的固定开销基本不变，所以这些符号的占比被动升高。`__skb_recv_udp`在A组占10.65%，收包两组都在发生，与去抖无关。
 
 ### 9.3 client报表解读
 
@@ -371,7 +371,7 @@ sudo perf report -i results_A_ignored/A_client.data --stdio --no-children | head
 
 ## 10 延伸
 
-两个方向可以补测。若目标是省网络带宽或发送端负载，debounce应配置在service侧json（发送端过滤），收益模型完全不同——省的是②③的流量和两端协议栈开销，对应第二轮实验。real变体（全转发但每次都比对）测过滤自身开销上界，用来回答什么时候配debounce反而亏——消息几乎全是真变化时，比较开销白付，一条也省不下来。
+两个方向可以补测。若目标是省网络带宽或发送端负载，debounce应配置在service侧json（发送端过滤，待验证——本文只测过client侧配置，已测数据不能外推发送侧行为），收益模型完全不同——省的是②③的流量和两端协议栈开销，对应第二轮实验。real变体（全转发但每次都比对）测过滤自身开销上界，用来回答什么时候配debounce反而亏——消息几乎全是真变化时，每条都要多付一次逐字节比较的开销，却一条也没过滤掉、一条投递也省不下，只有成本没有收益。
 
 ## references
 
