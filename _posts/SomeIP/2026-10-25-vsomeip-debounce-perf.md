@@ -12,7 +12,7 @@ tags: [cpp,linux,system]
 这套机制对资源的实际影响需要量化回答三个问题：省了多少CPU、省在哪个环节、过滤本身付出多少成本。本文用A/B对比实验加perf采样测量，负载为5000条、约5秒的事件通知（perf采样窗口7秒）。结论先行：
 
 - client进程CPU从约15%单核降到约0（-99.9%）；
-- RM_master CPU下降42%，而过滤本身只花12%（两者基数不同，见9.2）；
+- RM_master CPU下降42%，而过滤本身只花12%（两者基数不同：绝对值上约53 ms比较成本换313 ms净节省，见9.2）；
 - 网络链路流量零节省——过滤发生在收包之后，省的是"收下来之后"的一切。
 
 实验环境承接前篇：单机veth+netns模拟双机，拓扑与搭建命令见前文。测量机只有无线网卡，perf版本6.8.12，`kernel.perf_event_paranoid=4`（内核限制perf权限的等级，此值下非root完全不可用），所有perf命令必须加sudo。文中全部数据来自`results_A_ignored/`、`results_B_ignored/`目录下的perf stat与perf report原始输出。
@@ -21,7 +21,7 @@ tags: [cpp,linux,system]
 
 ### 2.1 与debounce_callback_tests的区别
 
-`network_tests`里有两个debounce相关的测试，过滤维度不同：
+本文对比`network_tests`里最常用的两个debounce测试，过滤维度不同（该目录下另有debounce_filter_tests、debounce_frequency_tests，共4个，不在本文范围）：
 
 |          | debounce_tests（本篇）               | debounce_callback_tests                                    |
 | -------- | ------------------------------------ | ---------------------------------------------------------- |
@@ -36,7 +36,7 @@ tags: [cpp,linux,system]
 
 service以0xb657/0x0003offer三个FIELD事件（字段状态的通知，事件号0x8001/0x8002/0x8004），每个子测试发10条notify，客户端过滤后期望收到5~6条。flat子测试在事件0x8001上配置ignore字节[0,5]，字节0/5任意变化视为未变化，10条只转发5条；increase/decrease子测试在0x8002上配置ignore[0,5,7,8,9,10]，payload长度逐条递增/递减，考察长度变化与ignore的交互；mask子测试在0x8004上带位掩码（index 0 mask 0x0f、index 5 mask 0xfe），被mask掉的位变化不算变化。
 
-old/new payload逐字节比较的内部逻辑（ignore跳过、partial mask按`~mask`位比较）与前篇拆解的`event::add_subscriber()`构建的filters lambda相同；不过本测试走的是json配置路径，实际执行的是`register_event()`构建的`epsilon_change_func_`，`filters_`为空。此处不再重复；本篇的perf diff会在热点里再次见到`register_event()`的这个lambda。
+old/new payload逐字节比较的内部逻辑（ignore跳过、partial mask按`~mask`位比较）与前篇拆解的`event::add_subscriber()`构建的filters lambda相同；不过两条路径归属不同：json配置走事件级的`epsilon_change_func_`，API `subscribe_with_debounce`走订阅者级的`filters_`。本测试走的是json配置路径，实际执行的是`register_event()`构建的`epsilon_change_func_`，`filters_`为空。此处不再重复；本篇的perf diff会在热点里再次见到`register_event()`的这个lambda。
 
 ## 3 数据通路与收益模型
 
@@ -128,7 +128,7 @@ B组（去抖）直接使用现有`debounce_test_client.json`；A组（基线）
 
 ### 4.4 指标体系
 
-测量围绕四类指标：veth_master的RX包数差值做控制变量校验（A/B两组必须相等）；client实收条数做去抖生效证据（B约6条、A约5010条）；client与RM_master的CPU占用做核心收益指标（`perf stat -p`按PID采样）；`perf record -F 99 -g`（每秒采样99次、记录调用栈）加`perf diff`对比两组热点分布。每组跑5轮取均值和标准差；采样窗口7秒，下文CPU占比与每秒速率按该窗口折算；perf diff占比来自末轮单次采样（见9.2）。
+测量围绕四类指标：veth_master的RX包数差值做控制变量校验（脚本在整轮4个子测试的首尾各采样一次，A/B差值必须一致）；client实收条数做去抖生效证据（B约6条、A约5010条）；client与RM_master的CPU占用做核心收益指标（`perf stat -p`按PID采样）；`perf record -F 99 -g`（每秒采样99次、记录调用栈）加`perf diff`对比两组热点分布。每组跑5轮取均值和标准差；采样窗口7秒，下文CPU占比与每秒速率按该窗口折算；perf diff占比来自末轮单次采样（见9.2）。
 
 CPU占用取perf stat的三个事件：task-clock，任务实际占用CPU运行的时长，单位ms，等待和睡眠不累计；context-switches，内核记录到该任务的上下文切换次数，进程睡眠让出核与被唤醒重新调度都计入；cpu-migrations，任务在CPU核之间的迁移次数。第8章数据表把后两项分别缩写为ctx、mig。
 
@@ -202,6 +202,8 @@ if (is_stress_
     return;
 }
 ```
+
+注意这段早退前面还有一段固定开销：源码`debounce_test_client.cpp:144-149`在早退判断之前，每条消息都会构造一个`std::stringstream`，把7字节payload逐字节做hex格式化，再`VSOMEIP_DEBUG << s.str()`输出。即使日志级别把DEBUG过滤掉，格式化本身依然执行。所以压力模式下的A/B两组client都为每条消息付了这份成本；它计入A组client的1096.5 ms，也是9.1节单条成本口径的一部分。
 
 订阅窗口从固定等待2秒改为压力模式下睡满整个负载窗口（count+3000ms余量），保证client在负载期间保持订阅——提前STOP会截断负载，见7.2节：
 
@@ -298,7 +300,10 @@ Ubuntu 24.04的perf 6.8里perf diff没有`--stdio`选项（perf report才有）�
 
 ### 7.5 前置坑
 
-`kernel.perf_event_paranoid=4`下非root的perf完全不可用，一律sudo；源码目录的测试json是cmake configure_file的生成物，每次构建会被覆盖，实验用的配置改动要放build目录；双端json需要不同的`network`参数做UDS隔离，debounce_tests里的命名是交叉的——master侧client.json的network叫`vsomeip_slave`，slave侧service.json叫`vsomeip_master`，不影响功能但容易看晕；基线组收到的消息数远超期望表长度，越界保护必须先行。
+- `kernel.perf_event_paranoid=4`下非root的perf完全不可用，所有perf命令一律sudo；
+- 源码目录的测试json是cmake configure_file的生成物，每次构建会被覆盖，实验用的配置改动要放build目录；
+- 双端json需要不同的`network`参数做UDS隔离，debounce_tests里的命名是交叉的——master侧client.json的network叫`vsomeip_slave`，slave侧service.json叫`vsomeip_master`，不影响功能但容易看晕；
+- 基线组收到的消息数远超期望表长度，`compare_payload`的越界保护必须先行。
 
 ## 8 实验数据
 
@@ -337,7 +342,9 @@ Ubuntu 24.04的perf 6.8里perf diff没有`--stdio`选项（perf report才有）�
 | client cpu-migrations       | 2904（n=5）                 | ≈ 0           | ≈ 100%            |
 | **RM_master task-clock**    | 743.9 ± 8 ms（n=4）         | 430.9 ± 46 ms（n=5） | **-42%**          |
 | RM_master context-switches  | 12818 ± 234（n=4）          | 9938 ± 65（n=5） | -22%              |
-| veth_master RX包数          | ≈ 5010                      | ≈ 5010        | 0（控制变量成立） |
+| veth_master RX包数          | 两组一致（5000+ 包）        | 两组一致（5000+ 包） | 0（控制变量成立） |
+
+veth RX列不是单个子测试的计数：`debounce_bench.sh`只在整轮4个子测试的首尾各用`ip -s link show veth_master`读一次RX包数，差值含全部子测试的notify以及SD、控制报文，所以绝对值略高于5000。有意义的是A/B两次走同一流程、差值一致——这证明debounce配置没改变链路流量。
 
 ## 9 数据分析
 
@@ -345,19 +352,19 @@ Ubuntu 24.04的perf 6.8里perf diff没有`--stdio`选项（perf report才有）�
 
 ![client与RM_master的task-clock对比（7s采样窗口均值）](/assets/images/2026/Oct/25-comparison-debounce-cpu.png)
 
-client开销接近归零：基线下5010条消息每条一次UDS唤醒，约716次/秒的唤醒频率（5010条/7秒窗口）吃掉约15%单核、每秒约2760次上下文切换；去抖后client在整个窗口只醒一次。这是过滤发生在RM_master、下游全部免单的直接证据。
+client开销接近归零：基线下5010条消息每条一次UDS唤醒，约716次/秒的唤醒频率（5010条/7秒窗口；窗口含2秒缓冲余量，突发期实际约1000次/秒，与4.2的1000 msg/s呼应）吃掉约15%单核、每秒约2760次上下文切换；去抖后client在整个窗口只醒一次。这是过滤发生在RM_master、下游全部免单的直接证据。
 
 RM_master净省42%：省掉的是每条消息的UDS序列化发送加唤醒对端，新增的是payload逐字节比较。假设3的"持平或略升"判断过于悲观。
 
 网络侧零节省被证实：两组veth收包数一致（控制变量成立），这条链路的成本与客户端debounce配置无关。
 
-单条消息的下游成本：A组总CPU（client加RM）减B组RM，(1096.5+743.9-430.9)≈1409 ms，除以5010条约0.28 ms CPU/条；上下文切换(19350+12818-9938)/5010≈4.4次/条。多订阅者、更大payload、更重的下游业务时，这两个数字按乘数放大。
+单条消息的净节省（下游成本减去RM过滤成本）：A组总CPU（client加RM）减B组RM，(1096.5+743.9-430.9)≈1410 ms，除以5010条约0.28 ms CPU/条；上下文切换(19350+12818-9938)/5010≈4.4次/条。口径说明：1096.5 ms与这里的0.28 ms/条都含测试回调本身（`on_message`里的7字节hex格式化，见5.2），不是纯vsomeip框架开销，换真实业务回调后绝对值会变，但"免投递即免下游成本"的结构不变。多订阅者、更大payload、更重的下游业务时，这两个数字按乘数放大。
 
 ### 9.2 perf diff热点解读（RM_master，A→B）
 
-以下均为B组相对A组同符号的采样占比差，来自末轮单次`perf record -F 99 -g`。B组最大用户态热点是`routing_manager_base::register_event(...)::{lambda#2}::_M_invoke`，diff占比+12.41%——正是注册事件时根据json配置构建的`epsilon_change_func_`（比较算法与前篇拆解的filters lambda相同；本测试未走`subscribe_with_debounce`，`filters_`为空）。去抖的价格约12%的RM CPU（B组profile内占比），对比42%的净节省（以A组task-clock为基数）——两者基数不同，不能直接相减，但收益远大于成本。
+以下均为B组相对A组同符号的采样占比差，来自末轮单次`perf record -F 99 -g`。注意采样量：`-F 99`对0.43~0.74秒的RM CPU只采到几十个样本（99次/秒×约0.5秒），单个符号的占比升降存在抖动，本节的diff只作定性参考，定量结论以8.3的perf stat均值为准。B组最大用户态热点是`routing_manager_base::register_event(...)::{lambda#2}::_M_invoke`，diff占比+12.41%——正是注册事件时根据json配置构建的`epsilon_change_func_`（比较算法与前篇拆解的filters lambda相同；本测试未走`subscribe_with_debounce`，`filters_`为空）。去抖的价格约12%的RM CPU（B组profile内占比），对比42%的净节省（以A组task-clock为基数）——两者基数不同，不能直接相减。换算成绝对值就清楚了：B组430.9 ms中约53 ms（430.9 × 12.4%）用于比较，已扣除此成本后，RM仍比A组（743.9 ms）净省约313 ms（省掉的转发开销约366 ms）。
 
-A组独占约13%的`[unknown] 0000000000000000`热区——无符号信息的地址，perf无法映射到函数名，推测是内联的拷贝/解析代码——B组消失。A组还独占一组转发路径符号：`pthread_mutex_lock`、`pthread_cond_signal`（唤醒等待线程）、`__tls_get_addr`（线程本地变量寻址）、`_Rb_tree_increment`（订阅/路由红黑树遍历）、`find_instance`（端点查找）——"查路由→UDS发送→唤醒client"这条链路的开销，B组归零。
+A组独占约13%的`[unknown] 0000000000000000`热区——无符号信息的地址，perf无法映射到函数名，推测是内联的拷贝/解析代码——B组消失。A组还独占一组转发路径符号：`pthread_mutex_lock`、`pthread_cond_signal`（唤醒等待线程）、`__tls_get_addr`（线程本地变量寻址）、`_Rb_tree_increment`（订阅/路由红黑树遍历）——"查路由→UDS发送→唤醒client"这条链路的开销，B组归零。
 
 B组中这些内核符号（futex、ttwu_queue_wakelist、datagram_poll、epoll_wait、psi_task_switch）的占比更高，但不代表绝对开销增加。perf diff比较的是同一符号在两组profile中的采样占比：B组总CPU更小，而收包路径的固定开销基本不变，所以这些符号的占比被动升高。`__skb_recv_udp`在A组占10.65%，收包两组都在发生，与去抖无关。
 
@@ -371,7 +378,7 @@ sudo perf report -i results_A_ignored/A_client.data --stdio --no-children | head
 
 ## 10 延伸
 
-两个方向可以补测。若目标是省网络带宽或发送端负载，debounce应配置在service侧json（发送端过滤，待验证——本文只测过client侧配置，已测数据不能外推发送侧行为），收益模型完全不同——省的是②③的流量和两端协议栈开销，对应第二轮实验。real变体（全转发但每次都比对）测过滤自身开销上界，用来回答什么时候配debounce反而亏——消息几乎全是真变化时，每条都要多付一次逐字节比较的开销，却一条也没过滤掉、一条投递也省不下，只有成本没有收益。
+两个方向可以补测。若目标是省网络带宽或发送端负载，把debounce配到service侧json并不能达到目的：当前版本（vSomeIP 3.4.10）的json debounce是接收侧机制，`register_event()`构建的`epsilon_change_func_`只作用于"外部设备发来的事件转发给本地应用"这一路径（`vsomeipUserGuide`的debounce段：*Events/fields sent by external devices will be forwarded to the applications only if a configurable function evaluates to true*）。RM_slave把本地通知发给远端订阅者时直接遍历targets调`send_to`，不经过该过滤器（`routing_manager_impl.cpp:987-1048`），所以配在service侧省不下②③的流量和协议栈开销；要降发送频率只能在应用层或发送逻辑里控制，那是另一套收益模型，对应第二轮实验。real变体（全转发但每次都比对）测过滤自身开销上界，用来回答什么时候配debounce反而亏——消息几乎全是真变化时，每条都要多付一次逐字节比较的开销，却一条也没过滤掉、一条投递也省不下，只有成本没有收益。
 
 ## references
 
